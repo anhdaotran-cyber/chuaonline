@@ -6,16 +6,19 @@ comment/gift events to OBS overlay clients over WebSocket.
 
 from __future__ import annotations
 
-import asyncio
+import json
 import logging
 import os
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 
 load_dotenv()
 
@@ -52,6 +55,8 @@ TRIGGER_COMMENTS = _parse_triggers(
 tiktok_status = "disconnected"
 _user_last_emit: dict[str, float] = {}
 _emit_timestamps: list[float] = []
+_heart_bank: dict[str, int] = {}
+HEARTS_FOR_OFFERING = 50
 _tiktok_task: asyncio.Task | None = None
 
 
@@ -105,6 +110,76 @@ def _allow_emit(user_key: str) -> bool:
     return True
 
 
+_AVATAR_HOSTS = (
+    "tiktokcdn.com",
+    "tiktokcdn-us.com",
+    "tiktokcdn-eu.com",
+    "tiktokv.com",
+    "muscdn.com",
+    "ibyteimg.com",
+    "byteimg.com",
+)
+
+
+def _host_ok(host: str) -> bool:
+    name = host.lower().rstrip(".")
+    return any(name == suffix or name.endswith("." + suffix) for suffix in _AVATAR_HOSTS)
+
+
+def _first_url(value: Any) -> str:
+    if isinstance(value, str) and value.startswith("http"):
+        return value
+    urls = None
+    if isinstance(value, dict):
+        for key in ("m_urls", "url_list", "urls"):
+            urls = value.get(key)
+            if urls:
+                break
+    else:
+        for key in ("m_urls", "url_list", "urls"):
+            urls = getattr(value, key, None)
+            if urls:
+                break
+    if not urls:
+        return ""
+    return str(urls[0])
+
+
+def _avatar_url(user: Any) -> str:
+    if user is None:
+        return ""
+    for attr in ("avatar_medium", "avatar_thumb", "avatar_large", "avatar"):
+        found = _first_url(getattr(user, attr, None))
+        if found:
+            return found
+    return ""
+
+
+def _fetch_avatar(url: str) -> tuple[bytes, str]:
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        final = urlparse(response.geturl())
+        if final.scheme not in {"http", "https"} or not _host_ok(final.hostname or ""):
+            raise ValueError("avatar host")
+        data = response.read(2_000_001)
+        if len(data) > 2_000_000:
+            raise ValueError("avatar size")
+        media = response.headers.get_content_type()
+    return data, media
+
+
+def _is_rose(name: str) -> bool:
+    text = _normalize_text(name)
+    return "hoa hồng" in text or "hoa hong" in text or "rose" in text.split()
+
+
+def _is_heart(name: str) -> bool:
+    text = _normalize_text(name)
+    if _is_rose(text):
+        return False
+    return any(word in text for word in ("tim", "heart", "yêu", "yeu"))
+
+
 async def _emit_event(
     *,
     event_type: str,
@@ -112,17 +187,82 @@ async def _emit_event(
     content: str,
     spawn_devotee: bool,
     user_key: str,
-) -> None:
+    offering: bool = False,
+    avatar: str = "",
+    chime: bool = True,
+    viewer_key: str = "",
+) -> bool:
     if not _allow_emit(user_key):
+        return False
+    payload: dict[str, Any] = {
+        "type": event_type,
+        "username": username,
+        "content": content,
+        "spawnDevotee": spawn_devotee,
+        "timestamp": int(time.time()),
+    }
+    if offering:
+        payload["offering"] = True
+    if viewer_key:
+        payload["userKey"] = viewer_key
+    elif spawn_devotee:
+        payload["userKey"] = user_key
+    if spawn_devotee and avatar:
+        payload["avatar"] = avatar
+    if not chime:
+        payload["chime"] = False
+    await manager.broadcast(payload)
+    return True
+
+
+async def _offer_from_hearts(username: str, user_key: str, added: int) -> None:
+    if added <= 0:
         return
-    await manager.broadcast(
-        {
-            "type": event_type,
-            "username": username,
-            "content": content,
-            "spawnDevotee": spawn_devotee,
-            "timestamp": int(time.time()),
-        }
+    bank = _heart_bank.get(user_key, 0) + added
+    while bank >= HEARTS_FOR_OFFERING:
+        sent = await _emit_event(
+            event_type="gift",
+            username=username,
+            content="50 tim",
+            spawn_devotee=False,
+            user_key=f"h:{user_key}:{time.time_ns()}",
+            offering=True,
+        )
+        if not sent:
+            break
+        bank -= HEARTS_FOR_OFFERING
+    _heart_bank[user_key] = bank
+
+
+_LEAVE_ACTIONS = {2, 7, 11}
+
+
+def _member_action_value(event: Any) -> int | None:
+    action = getattr(event, "action", None)
+    name = str(getattr(action, "name", "") or "").upper()
+    if name.endswith("USER_KICKOUT"):
+        return 11
+    if name.endswith("KICKOUT"):
+        return 7
+    if name.endswith("LEAVE"):
+        return 2
+    try:
+        return int(action)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _emit_leave(user_key: str) -> None:
+    if not user_key:
+        return
+    await _emit_event(
+        event_type="leave",
+        username="",
+        content="",
+        spawn_devotee=False,
+        user_key=f"leave:{user_key}:{time.time_ns()}",
+        chime=False,
+        viewer_key=user_key,
     )
 
 
@@ -154,6 +294,16 @@ async def _run_tiktok_client() -> None:
             DisconnectEvent,
             GiftEvent,
         )
+
+        try:
+            from TikTokLive.events import LikeEvent
+        except ImportError:
+            LikeEvent = None  # type: ignore[misc, assignment]
+
+        try:
+            from TikTokLive.events import JoinEvent
+        except ImportError:
+            JoinEvent = None  # type: ignore[misc, assignment]
     except ImportError:
         logger.exception("TikTokLive is not installed")
         tiktok_status = "error"
@@ -181,8 +331,7 @@ async def _run_tiktok_client() -> None:
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent) -> None:
             text = getattr(event, "comment", "") or ""
-            normalized = _normalize_text(text)
-            if normalized not in TRIGGER_COMMENTS:
+            if not text.strip():
                 return
             user = getattr(event, "user", None)
             nickname = getattr(user, "nickname", None) or getattr(user, "unique_id", "unknown")
@@ -192,7 +341,9 @@ async def _run_tiktok_client() -> None:
                 username=str(nickname),
                 content=text.strip(),
                 spawn_devotee=True,
-                user_key=f"c:{user_key}",
+                user_key=user_key,
+                avatar=_avatar_url(user),
+                chime=_normalize_text(text) in TRIGGER_COMMENTS,
             )
 
         @client.on(GiftEvent)
@@ -205,14 +356,37 @@ async def _run_tiktok_client() -> None:
             user = getattr(event, "user", None)
             nickname = getattr(user, "nickname", None) or getattr(user, "unique_id", "unknown")
             user_key = str(getattr(user, "unique_id", None) or nickname)
-            content = f"{gift_name} x{repeat}"
+            if _is_heart(str(gift_name)):
+                await _offer_from_hearts(str(nickname), user_key, int(repeat))
+                return
             await _emit_event(
                 event_type="gift",
                 username=str(nickname),
-                content=content,
+                content="Hoa hồng" if _is_rose(str(gift_name)) else f"{gift_name} x{repeat}",
                 spawn_devotee=False,
                 user_key=f"g:{user_key}",
+                offering=_is_rose(str(gift_name)),
             )
+
+        if JoinEvent is not None:
+
+            @client.on(JoinEvent)
+            async def on_member(event: JoinEvent) -> None:
+                if _member_action_value(event) not in _LEAVE_ACTIONS:
+                    return
+                user = getattr(event, "user", None)
+                user_key = str(getattr(user, "unique_id", None) or getattr(user, "nickname", "") or "")
+                await _emit_leave(user_key)
+
+        if LikeEvent is not None:
+
+            @client.on(LikeEvent)
+            async def on_like(event: LikeEvent) -> None:
+                user = getattr(event, "user", None)
+                nickname = getattr(user, "nickname", None) or getattr(user, "unique_id", "unknown")
+                user_key = str(getattr(user, "unique_id", None) or nickname)
+                count = int(getattr(event, "count", 0) or getattr(event, "like_count", 0) or 1)
+                await _offer_from_hearts(str(nickname), user_key, max(count, 1))
 
         delay = backoff_steps[backoff_index]
         try:
@@ -298,6 +472,21 @@ async def root() -> dict[str, str]:
     return {"status": "ok", "ws": "/ws", "health": "/health"}
 
 
+@app.get("/avatar")
+async def avatar(url: str = Query(min_length=8, max_length=2000)) -> Response:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not _host_ok(parsed.hostname or ""):
+        raise HTTPException(status_code=400, detail="unsupported avatar host")
+    try:
+        data, media = await asyncio.to_thread(_fetch_avatar, url)
+    except Exception:
+        logger.info("Avatar fetch failed")
+        raise HTTPException(status_code=404) from None
+    if not str(media).startswith("image/"):
+        raise HTTPException(status_code=415)
+    return Response(content=data, media_type=media, headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -310,8 +499,22 @@ async def websocket_endpoint(
     await manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive; overlay is receive-only.
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and payload.get("type") == "camera":
+                await manager.broadcast(
+                    {
+                        "type": "camera",
+                        "yaw": payload.get("yaw", 0),
+                        "auto": bool(payload.get("auto")),
+                        "speed": payload.get("speed", 1),
+                        "startedAt": payload.get("startedAt", 0),
+                        "phase": payload.get("phase", 0),
+                    }
+                )
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception:

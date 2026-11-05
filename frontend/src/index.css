@@ -1,11 +1,36 @@
 html,
-body,
-#root {
+body {
   margin: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#root {
   width: 100%;
   height: 100%;
   background: #1a100c;
   overflow: hidden;
+}
+
+@media (min-aspect-ratio: 9 / 16) {
+  #root {
+    width: min(100vw, calc(100vh * 9 / 16));
+    height: 100%;
+  }
+}
+
+body.control-page #root {
+  width: 100%;
+  height: 100%;
+  background: #140c0a;
 }
 
 * {
