@@ -9,6 +9,8 @@ backend/.env
 frontend/node_modules/
 frontend/dist/
 frontend/tmp/
+mobile/node_modules/
+mobile/.expo/
 
 # OS / IDE
 .DS_Store

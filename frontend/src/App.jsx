@@ -12,7 +12,9 @@ const TEST_AVATAR =
   );
 const MAX_TOASTS = 8;
 const MAX_HITS_PER_SEC = 10;
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const WS_TOKEN = import.meta.env.VITE_WS_TOKEN || "";
 
 function buildWsUrl() {

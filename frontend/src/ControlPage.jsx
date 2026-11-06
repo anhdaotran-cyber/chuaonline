@@ -5,7 +5,9 @@ import { isSensitive } from "./offeringSpeech.js";
 import { YAW_SPOTS, applyCameraState, bindCameraSender, currentYaw, readAuto, readSpeed, setAutoEnabled, subscribeCamera, writeSpeed, writeYaw, yawLabel } from "./cameraControl.js";
 import "./ControlPage.css";
 
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8000/ws";
+const WS_URL =
+  import.meta.env.VITE_WS_URL ||
+  `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 const WS_TOKEN = import.meta.env.VITE_WS_TOKEN || "";
 const TURN_RATE = 0.9;
 

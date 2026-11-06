@@ -6,6 +6,7 @@ comment/gift events to OBS overlay clients over WebSocket.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os

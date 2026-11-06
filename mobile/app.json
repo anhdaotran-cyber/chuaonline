@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Chùa Online",
+    "slug": "chua-online",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#1a100c",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "vn.trandao.chuaonline"
+    },
+    "android": {
+      "package": "vn.trandao.chuaonline",
+      "adaptiveIcon": {
+        "backgroundColor": "#1a100c",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-navigation-bar",
+        {
+          "hidden": true
+        }
+      ]
+    ]
+  }
+}
